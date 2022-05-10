@@ -6,17 +6,20 @@ import hudson.Launcher.ProcStarter;
 import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
+import hudson.util.FormValidation;
 import hudson.util.Secret;
+import io.jenkins.cli.shaded.org.apache.commons.lang.LocaleUtils;
 import hudson.model.AbstractProject;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import hudson.tasks.Builder;
 import hudson.tasks.BuildStepDescriptor;
 import org.kohsuke.stapler.DataBoundConstructor;
-
 import jenkins.tasks.SimpleBuildStep;
+
 import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.DataBoundSetter;
+import org.kohsuke.stapler.QueryParameter;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -26,9 +29,11 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -50,6 +55,8 @@ public class EggplantRunnerBuilder extends Builder implements SimpleBuildStep {
     private String pollInterval;
     private String requestTimeout;
     private String requestRetries;
+    private Boolean dryRun;
+    private String backoffFactor;
 
     @DataBoundConstructor
     public EggplantRunnerBuilder() {
@@ -82,6 +89,9 @@ public class EggplantRunnerBuilder extends Builder implements SimpleBuildStep {
     public String getRequestRetries() {
         return requestRetries;
     }
+    public String getBackoffFactor() {
+        return backoffFactor;
+    }    
 
     @DataBoundSetter
     public void setServerURL(String serverURL) {
@@ -124,19 +134,34 @@ public class EggplantRunnerBuilder extends Builder implements SimpleBuildStep {
     public void setRequestRetries(String requestRetries) {
         this.requestRetries = requestRetries;
     }
+    @DataBoundSetter
+    public void setBackoffFactor(String backoffFactor) {
+        this.backoffFactor = backoffFactor;
+    }    
+    @DataBoundSetter
+    public void setDryRun(boolean dryRun) {
+        this.dryRun = dryRun;
+    }
     @Override
-    public void perform(Run<?, ?> run, FilePath workspace, Launcher launcher, TaskListener listener) throws InterruptedException, IOException {
+    public void perform(Run<?, ?> run, FilePath workspace, EnvVars env, Launcher launcher, TaskListener listener) throws InterruptedException, IOException {
         PrintStream logger = listener.getLogger();
         String buildId = run.getId();
+        String localeString = "";
         Locale locale = Locale.getDefault();
-        String localeString = String.format("%s.utf-8", locale.toString());
+
+        logger.println("locale: " + locale);
+        logger.println("locale.getCountry(): " + locale.getCountry());
+        if (!locale.getCountry().equals(""))
+            localeString = String.format("%s.utf-8", locale.toString());
+        else
+            localeString = String.format("%s.utf-8", "en_US");
 
         OperatingSystem os = this.getOperatingSystem(workspace, launcher);
         FilePath uniqueWorkspace = workspace.child(buildId); 
         FilePath cliFile = this.downloadCLIExecutable(uniqueWorkspace, os);
         logger.println("cliFile: " + cliFile);
-        String[] command = this.getCommand(cliFile, buildId, os);
-        logger.println("command: " + command);
+        String[] command = this.getCommand(cliFile, buildId, os, env);
+        logger.println("command: " + Arrays.toString(command));
         EnvVars envVars = new EnvVars();
         envVars.put("LC_ALL", localeString);
         envVars.put("LANG", localeString);
@@ -191,27 +216,36 @@ public class EggplantRunnerBuilder extends Builder implements SimpleBuildStep {
       }
     
 
-    private String[] getCommand(FilePath cliFile, String buildId, OperatingSystem os) {
+    private String[] getCommand(FilePath cliFile, String buildId, OperatingSystem os, EnvVars env) {
         List<String> commandList = new ArrayList<String>();
         
         //commandList.add("./" + cliFile.getName()); // cliPath
         commandList.add(cliFile.getRemote()); // cliPath
         commandList.add(this.serverURL); // serverURLArg
         commandList.add(this.testConfigId); // testConfigIdArgs
-        if (!this.clientId.equals("")) // clientIdArg
+        if (this.clientId != null && !this.clientId.equals("")) // clientIdArg
             commandList.add(String.format("--client-id=%s", this.clientId)); 
-        commandList.add(String.format("--client-secret=%s", this.clientSecret)); // clientSecretArg
+        
+        // clientSecretArg
+        if (this.clientSecret != null && !this.clientSecret.getPlainText().isEmpty()) 
+            commandList.add(String.format("--client-secret=%s", this.clientSecret));
+        else if (env.get("DAI_CLIENT_SECRET") != null && !env.get("DAI_CLIENT_SECRET").equals("")) 
+            commandList.add(String.format("--client-secret=%s", env.get("DAI_CLIENT_SECRET")));
 
-        if (!this.logLevel.equals("")) // logLevelArg
+        if (this.logLevel != null && !this.logLevel.equals("")) // logLevelArg
             commandList.add(String.format("--log-level=%s", this.logLevel)); 
-        if (!this.caCertPath.equals("")) // caCertPathArg
+        if (this.caCertPath != null && !this.caCertPath.equals("")) // caCertPathArg
             commandList.add(String.format("--ca-cert-path=%s", this.caCertPath)); 
-        if (!this.pollInterval.equals("")) // caCertPathArg
+        if (this.pollInterval != null && !this.pollInterval.equals("")) // caCertPathArg
             commandList.add(String.format("--poll-interval=%s", this.pollInterval)); 
-        if (!this.requestTimeout.equals("")) // requestTimeoutArg
+        if (this.requestTimeout != null && !this.requestTimeout.equals("")) // requestTimeoutArg
             commandList.add(String.format("--request-timeout=%s", this.requestTimeout)); 
-        if (!this.requestRetries.equals("")) // requestTimeoutArg
+        if (this.requestRetries != null && !this.requestRetries.equals("")) // requestTimeoutArg
             commandList.add(String.format("--request-retries=%s", this.requestRetries)); 
+        if (this.dryRun != null && this.dryRun) // dryRunArg
+            commandList.add("--dry-run");
+        if (this.backoffFactor != null && !this.backoffFactor.equals("")) // backoffFactorArg
+            commandList.add(String.format("--backoff-factor=%s", this.backoffFactor));             
 
         return commandList.toArray(new String[0]);
     }
@@ -228,6 +262,123 @@ public class EggplantRunnerBuilder extends Builder implements SimpleBuildStep {
         @Override
         public String getDisplayName() {
             return "Eggplant Runner";
+        }
+
+        public FormValidation doCheckServerURL(@QueryParameter String value) throws IOException{
+            if(value.isEmpty()) {
+                return FormValidation.error("Server URL cannot be empty.");
+            }
+            else if(!isValidURL(value)){
+                return FormValidation.error("Invalid server_url.");
+            }
+            return FormValidation.ok();
+        }
+    
+        public FormValidation doCheckTestConfigId(@QueryParameter String value) throws IOException {
+            if(value.isEmpty()) {
+                return FormValidation.error("Test Config Id cannot be empty.");
+            }
+            else if(!isValidUuid(value)){
+                return FormValidation.error("Invalid test configuration id.");
+            }
+            return FormValidation.ok();
+        }
+
+        public FormValidation doCheckClientId(@QueryParameter String value) throws IOException {
+            if(value.isEmpty()) {
+                return FormValidation.error("Client Id cannot be empty.");
+            }
+            return FormValidation.ok();
+        }
+       
+        public FormValidation doCheckClientSecret(@QueryParameter String value) throws IOException {
+            if(value.isEmpty()) {
+                return FormValidation.error("Client Secret cannot be empty.");
+            }
+            else if(!isValidUuid(value)){
+                return FormValidation.error("Invalid Client Secret.");
+            }
+            return FormValidation.ok();
+        }
+
+        public FormValidation doCheckLogLevel(@QueryParameter String value) throws IOException {
+            if(!value.isEmpty()&&!isValidLogLevel(value)){
+                return FormValidation.error("Invalid Log Level.");
+            }
+            return FormValidation.ok();
+        }
+
+        public FormValidation doCheckPollInterval(@QueryParameter String value) throws IOException {
+            if(!value.isEmpty()&&!isValidNumeric(value)){
+                return FormValidation.error("Invalid Poll Interval.");
+            }
+            return FormValidation.ok();
+        }
+
+        public FormValidation doCheckRequestTimeout(@QueryParameter String value) throws IOException {
+            if(!value.isEmpty()&&!isValidNumeric(value)){
+                return FormValidation.error("Invalid Request Timeout.");
+            }
+            return FormValidation.ok();
+        }
+
+        public FormValidation doCheckRequestRetries(@QueryParameter String value) throws IOException {
+            if(!value.isEmpty()&&!isValidNumeric(value)){
+                return FormValidation.error("Invalid Request Retires.");
+            }
+            return FormValidation.ok();
+        }
+
+        public FormValidation doCheckBackoffFactor(@QueryParameter String value) throws IOException {
+            if(!value.isEmpty()&&!isValidDecimal(value)){
+                return FormValidation.error("Invalid Backoff Factor.");
+            }
+            return FormValidation.ok();
+        }
+
+        private Boolean isValidURL(String value){
+            try {
+                new URL(value).toURI();
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        private Boolean isValidUuid(String value){
+            Pattern p = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+            Boolean isMatch=p.matcher(value).matches();
+            if(isMatch)
+                return true;
+            else
+                return false;
+        }
+
+        private Boolean isValidNumeric(String value){
+            Pattern p = Pattern.compile("^\\d+$");
+            Boolean isMatch=p.matcher(value).matches();
+            if(isMatch)
+                return true;
+            else
+                return false;
+        }
+
+        private Boolean isValidDecimal(String value){
+            Pattern p = Pattern.compile("^\\d+\\.?\\d*$");
+            Boolean isMatch=p.matcher(value).matches();
+            if(isMatch)
+                return true;
+            else
+                return false;
+        }
+
+        private Boolean isValidLogLevel(String value){
+            Pattern p = Pattern.compile("INFO|DEBUG|WARNING|ERROR");
+            Boolean isMatch=p.matcher(value).matches();
+            if(isMatch)
+                return true;
+            else
+                return false;
         }
 
     }
